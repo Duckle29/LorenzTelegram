@@ -8,6 +8,9 @@ import math
 
 from enum import IntEnum
 
+class UnsupportedCommand(Exception):
+    pass
+
 class Error(IntEnum):
     OK =                            0
     GENERIC =                       1
@@ -48,7 +51,6 @@ class Error(IntEnum):
 
     STACK_OVERFLOW =                60
     ANGLE_OVERFLOW =                61
-
 
 class Command(IntEnum):
     STX =                           0x02,
@@ -92,6 +94,7 @@ class Telegram:
         self.command = command
         self.addr_to = addr_to
         self.addr_from = addr_from
+
         self.parameters = parameters
 
         self.parameter_cnt = len(parameters)
@@ -101,7 +104,7 @@ class Telegram:
         self.stuffed = False
         self.valid = False
         if command is not None:
-            self.calc_checksums()
+            self.checksum, self.wchecksum = self.calc_checksums()
     
     def from_bytes(self, bytes_obj: bytes):
         """Construct a Telegram object from a bytes object
@@ -125,7 +128,7 @@ class Telegram:
             for b in bytes_obj[4:-2]:
                 self.parameters.append(b)
         
-        self.calc_checksums()
+        self.checksum, self.wchecksum = self.calc_checksums()
         self.valid = self.checksum == bytes_obj[-2] and self.wchecksum == bytes_obj[-1]
 
     def calc_checksums(self):
@@ -133,9 +136,6 @@ class Telegram:
            
            checksum: 1-byte sum of all the bytes in the message excluding stx and checksums
            wchecksum: 1-byte sum of all the checksums, with 1 added on overflows
-
-        Args:
-            telegram (list[int]): The telegram as 1-byte sized integers
 
         Returns:
             tuple[int, int]: The checksum and weighted checksum
@@ -154,8 +154,8 @@ class Telegram:
                 wchecksum += 1
             wchecksum = wchecksum & 0xFF
         
-        self.checksum = checksum
-        self.wchecksum = wchecksum
+        return checksum, wchecksum
+
 
     def serialize(self) -> bytes:
         """Serialize the Telegram to a bytes string for sending
@@ -171,9 +171,28 @@ class Telegram:
             tg = [Command.STX] + tg
 
         return bytes([Command.STX] + tg)
-        
+
+
+class SensorConfig:
+    
+    def __init__(self) -> None:
+        pass
 
 class LorenzConnector:
+
+    SAMPLE_RATES = {
+            20:     0xFA,
+            25:     0xC8,
+            50:     0x64,
+            100:    0x32,
+            200:    0x19,
+            250:    0x14,
+            500:    0x0A,
+            1000:   0x05,
+            1250:   0x04,
+            2500:   0x02,
+            5000:   0x01
+        }
 
     def __init__(self, port: str, timeout=0.01, **kwargs):
         """Create an object with a connection to a serial device
@@ -210,7 +229,7 @@ class LorenzConnector:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.ser.close()
     
-    def send_telegram(self, tg: Telegram) -> Telegram | None:
+    def _send_telegram(self, tg: Telegram) -> Telegram | None:
         """Send a Telegram and return the response (if any)
 
         Args:
@@ -220,17 +239,15 @@ class LorenzConnector:
             Telegram: Telegram response. None if sent telegram was a broadcast
         """
 
+        if tg.command in self.UNSUPPORTED_COMMANDS:
+            raise UnsupportedCommand(f'{self.__class__.__name__} does not support {tg.command}')
+
         self.ser.write(tg.serialize())
         if tg.addr_to != 0:
-            rx_tg = self.recv_telegram(tg)
-
-            if rx_tg.command == Command.SCMD_NACK:
-                #err = Error(rx_tg.parameters[0])
-                print("err")
-
+            rx_tg = self._recv_telegram(tg)
             return rx_tg
                 
-    def recv_telegram(self, tx_tg: Telegram) -> Telegram:
+    def _recv_telegram(self, tx_tg: Telegram) -> Telegram:
         """Recieve a telegram from a sensor
 
         Args:
@@ -268,8 +285,11 @@ class LorenzConnector:
         tg = Telegram()
         tg.from_bytes(bytes(rx_tg))
         return tg
-        
-    def get_value(self) -> tuple[tuple[int, int], tuple[int, int]]:
+
+    def hello(self, addr_to: int=1) -> Telegram | None:
+        return self._send_telegram(Telegram(Command.SCMD_Hello, addr_to=addr_to))
+
+    def get_raw(self) -> tuple[tuple[int, int], tuple[int, int]]:
         """Return a single set of raw and calibrated values from channel 0 and 1
 
         Returns:
@@ -278,7 +298,7 @@ class LorenzConnector:
 
         tg = Telegram(Command.SCMD_ReadRaw)
         
-        resp_tg = self.send_telegram(tg)
+        resp_tg = self._send_telegram(tg)
 
         raw0 = (resp_tg.parameters[0] << 8) + resp_tg.parameters[1]
         raw1 = (resp_tg.parameters[2] << 8) + resp_tg.parameters[3]
@@ -287,44 +307,46 @@ class LorenzConnector:
         cal1 = (resp_tg.parameters[6] << 8) + resp_tg.parameters[7]
         return (raw0, cal0), (raw1, cal1)
 
-    def get_status_short(self):
-
-        tg = Telegram(Command.SCMD_ReadStatusShort)
-        resp_tg = self.send_telegram(tg)
-
-        return resp_tg
+    def get_status_short(self, addr_to: int=1) -> Telegram:
+        return self._send_telegram(Telegram(Command.SCMD_ReadStatusShort, addr_to=addr_to))
     
+    def get_status(self, addr_to: int=1) -> Telegram:
+        return self._send_telegram(Telegram(Command.SCMD_ReadStatus, addr_to=addr_to))
+
+    def get_config_block(self, block: int, addr_to: int=1) -> Telegram:
+        block = min(0xFF, max(0, block))
+        return self._send_telegram(Telegram(Command.SCMD_ReadConfig, addr_to=addr_to, parameters=[block]))
+
+    def write_config_block(self, block: int, params: list[int]=[], addr_to: int=1) -> Telegram:
+        block = min(0xFF, max(0, block))
+
+    def restart_device(self, addr_to: int=1) -> Telegram:
+        return self._send_telegram(Telegram(Command.SCMD_RestartDevice, addr_to=addr_to))
+
+    def zero_angle(self, addr_to: int=1) -> Telegram:
+        return self._send_telegram(Telegram(Command.SCMD_SetAngleToZero, addr_to=addr_to))
+
     def start_streaming(self, sample_rate: int, count: int=0, channel: str='A'):
-        sample_rates = {
-            20:     0xFA,
-            25:     0xC8,
-            50:     0x64,
-            100:    0x32,
-            200:    0x19,
-            250:    0x14,
-            500:    0x0A,
-            1000:   0x05,
-            1250:   0x04,
-            2500:   0x02,
-            5000:   0x01
-        }
+
+        if channel not in ['A', 'B', 'C']:
+            raise ValueError('Channel can only be A B or C')
 
         if channel == 'C':
             self.mode = 'SOSM_DUAL'
         else:
             self.mode = 'SOSM_SINGLE'
 
-        channel = ord(channel) # Convert char to int
-
-        params = [3, sample_rates[sample_rate]]
-        if count <= 255:
+        params = [3, self.SAMPLE_RATES[sample_rate]]
+        
+        count = min(0xFFFF, max(0, count))
+        if count <= 0xFF:
             params.append(0)
         params.append(count)
-        params.append(channel)
+        params.append(ord(channel))
         
         # Switch to SOSM mode #3
         tg = Telegram(Command.SCMD_GotoSpecialMode, parameters=params)
-        return self.send_telegram(tg)
+        return self._send_telegram(tg)
     
     def streaming_recv_poll(self):
         if not 'SOSM' in self.mode:
@@ -349,6 +371,11 @@ class LorenzConnector:
 
 class LCV_USB(LorenzConnector):
 
+
+    UNSUPPORTED_COMMANDS = [
+        Command.SCMD_SetAngleToZero,
+    ]
+    
     def __init__(self, port: str, **kwargs) -> None:
 
         if 'baudrate' in kwargs:
@@ -371,8 +398,4 @@ if __name__ == '__main__':
             if val is not None:
                 print(f'{idx:3d}: {val}')
             #time.sleep(0.01)
-        
         lc.stop_streaming()
-        print(lc.ser.in_waiting)
-        time.sleep(1)
-        print(lc.ser.in_waiting)
