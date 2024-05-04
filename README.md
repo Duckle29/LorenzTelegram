@@ -8,4 +8,6 @@ Currently raw readings, and `Speed Optimized Streaming Mode (SOSM) mode #3` has 
 
 In streaming mode, the library currently relies on the main program polling the recv function to process the serial RX buffer. This may move to a call-back based method later.
 
-While this currently works, I'd also like to re-work this to work on byte arrays, instead of integers, as the whole protocol is very much byte oriented, and I had to do some meh hacks to work with ints.
+## TODO:
+- [ ] **Implement every command from API doc** -> Most simple commands have been added. Working on configuration commands
+- [ ] **Implement other sensor types**
