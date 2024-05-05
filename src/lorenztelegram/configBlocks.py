@@ -1,23 +1,22 @@
 #!/usr/bin/env python3
 
 from typing import Any
+from dataclasses import dataclass
 
 class ConfigBlock:
     _PARAMETERS = {}
-    _READONLY = False
-    _ID = None
-    def __init__(self, payload: int=[0 for _ in range(27)]) -> None:
-        self.payload = payload
-
+    READONLY = False
+    _ID: int=None
+    BLOCK: int=None
+    def __init__(self) -> None:
         self._PARAMETERS['checksum'] = {'offset': 28,  'size': 2}
         self._PARAMETERS['wchecksum'] = {'offset': 30,  'size': 2}
         self._PARAMETERS['id'] = {'offset': 0,   'size': 1}
-        
-        last_param = self._PARAMETERS[list(self._PARAMETERS)[-1]]
-        offset = last_param['offset']+last_param['size']
-        self._PARAMETERS['reserved_n'] = {'offset': offset,   'size': 28-offset}
+
+        for param in self._PARAMETERS:
+            setattr(self, param, 0)
     
-    def calc_checksums(self) -> tuple[bytes, bytes]:
+    def calc_checksums(self, payload: list[int]) -> tuple[bytes, bytes]:
         """Generates checksums of telegram
            
            checksum: 2-byte sum of all the bytes in the message excluding stx and checksums
@@ -26,12 +25,10 @@ class ConfigBlock:
         Returns:
             tuple[int, int]: The checksum and weighted checksum
         """
-
-        data = [self._ID] + self.payload
         
         checksum = 0
         wchecksum = 0
-        for itm in data:
+        for itm in payload:
             checksum += itm
             checksum &= 0xFFFF
 
@@ -39,80 +36,75 @@ class ConfigBlock:
             wchecksum &= 0xFFFF
         
         return checksum.to_bytes(2), wchecksum.to_bytes(2)
-    
-    def __getattribute__(self, name: str) -> Any:
-        if name in self._PARAMETERS:
-            offset = self._PARAMETERS[name]['offset'] # Read the parameter from the configblock payload
-            size = self._PARAMETERS[name]['size']
-            attr = self.payload[offset:1+offset+size]
-            
-            # Convert from bytes to one int
-            res = 0
-            for itm in attr:
-                res = res << 8 
-                res += itm
-        
-            # If this value has a LUT associated with it. Convert it. If this fails it'll return the raw value
-            # This is used for settings such as options for custom user values not in the LUT
-            if 'LUT' in self._PARAMETERS[name]:
-                LUT = self._PARAMETERS[name]['LUT']
-                try:
-                    tmp = LUT[res]
-                except KeyError:
-                    tmp = res
-                return tmp
-            return res
-            
-        return super().__getattribute__(name)
 
-    def __setattr__(self, name: str, value: Any) -> None:
-        if self._READONLY:
-            raise AttributeError(f'{self.__class__.__name__} is read only')
-        
-        if name in self._PARAMETERS:
-            offset = self._PARAMETERS[name]['offset']
-            size = self._PARAMETERS[name]['size'] -1
+    def from_payload(self, payload: list[int]) -> None:
+        for attr in self._PARAMETERS:
+            if attr in ['checksum', 'wchecksum']:
+                continue
+            
+            value = 0
+            idx = self._PARAMETERS[attr]['offset'] + self._PARAMETERS[attr]['size'] - 1
+            for _ in range(self._PARAMETERS[attr]['size']):
+                value = value << 8
+                value += payload[idx]                
+                idx -= 1
 
-            # Construct a reverse LUT. Duped keys will be squashed.
-            # If this fails it'll return the raw value.
-            # This is used for settings such as options for custom user values not in the LUT
-            if 'LUT' in self._PARAMETERS[name]['LUT']:
-                REVERSE_LUT = {v: k for k, v in self._PARAMETERS[name]['LUT']} 
-                try:
-                    tmp = REVERSE_LUT[value]
-                except KeyError:
-                    tmp = value
-                value = tmp
-        
-            while size >= 0:
-                self.payload[offset+size] = value & 0xFF
-                value = value >> 8
-                size -= 1
-        return super().__setattr__(name, value)
+            if 'LUT' in self._PARAMETERS[attr]:
+                if value in self._PARAMETERS[attr]['LUT']:
+                    value = self._PARAMETERS[attr]['LUT'][value]
+            
+            setattr(self, attr, value)
+
+    def gen_payload(self) -> list[int]:
+        payload = [0 for _ in range(27)]
+        payload[0] = self._ID
+
+        for attr in self._PARAMETERS:
+            if attr in ['checksum', 'wchecksum']:
+                continue
+
+            value = getattr(self, attr)
+            if 'LUT' in attr:
+                REVERSE_LUT = {v: k for k, v in attr['LUT']} 
+                
+                if value in REVERSE_LUT:
+                    value = REVERSE_LUT[value]           
+ 
+            idx = attr['offset'] + attr['size'] -1
+            for _ in range(attr['size']):
+                payload[idx] = value & 0xFF
+                value >> 8
+                idx -= 1
+            
+        return payload
 
     def serialize(self) -> bytes:
-        checksum, wchecksum = self.calc_checksums()
-        packet = [self._ID, self.payload]
-        return bytes(packet) + checksum + wchecksum
+        if self.READONLY:
+            raise AttributeError(f'{self.__class__.__name__} is read only')
+        payload = self.gen_payload()
+            
+        checksum, wchecksum = self.calc_checksums(payload)
+        return bytes(payload) + checksum + wchecksum
 
+@dataclass
 class STATOR_HEADER(ConfigBlock):
-    _BLOCK = 0
-    _ID = 0x10
-    _READONLY = True
+    BLOCK: int=0
+    _ID: int=0x10
+    READONLY: bool=True
+
     _PARAMETERS = {
             'type':                 {'offset': 1,   'size': 3}, 
             'serial':               {'offset': 4,   'size': 4}, 
             'si_idx':               {'offset': 8,   'size': 1},
-            'active_port_count':    {'offset': 9,   'size': 1},
+            'active_port_count':    {'offset': 9,   'size': 1}
     }
 
-    def __init__(self) -> None:
-        super().__init__()
-
+@dataclass
 class STATOR_HARDWARE(ConfigBlock):
-    _BLOCK = 1
-    _ID = 0x12
-    _READONLY = True
+    BLOCK: int=1
+    _ID: int=0x12
+    READONLY: bool=True
+
     _PARAMETERS = {
             'production_time':      {'offset': 1,   'size': 4}, 
             'STAS':                 {'offset': 5,   'size': 5}, 
@@ -138,13 +130,11 @@ class STATOR_HARDWARE(ConfigBlock):
                                     }       
     }
 
-    def __init__(self) -> None:
-        super().__init__()
-
+@dataclass
 class STATOR_OPERATION(ConfigBlock):
-    _BLOCK = 2
-    _ID = 0x13
-    _READONLY = False
+    BLOCK: int=2
+    _ID: int=0x13
+    READONLY: bool=False
     _PARAMETERS = {
             'modification_time':    {'offset': 1,   'size': 4}, 
             'reserved_0':           {'offset': 5,   'size': 1}, 
@@ -185,13 +175,11 @@ class STATOR_OPERATION(ConfigBlock):
             'lp_filter_B':          {'offset': 15,  'size': 2},
     }
 
-    def __init__(self) -> None:
-        super().__init__()
-
+@dataclass
 class STATOR_SOFTWARE_CONFIG(ConfigBlock):
-    _BLOCK = 3
-    _ID = 0x14
-    _READONLY = False
+    BLOCK: int=3
+    _ID: int=0x14
+    READONLY: int=False
     _PARAMETERS = {
             'software_id':      {'offset': 1,   'size': 1, 'LUT':
                                  {
@@ -203,13 +191,11 @@ class STATOR_SOFTWARE_CONFIG(ConfigBlock):
             'software_config':  {'offset': 2,   'size': 26}, 
     }
 
-    def __init__(self) -> None:
-        super().__init__()
-
+@dataclass
 class ROTOR_HEADER(ConfigBlock):
-    _BLOCK = 128
-    _ID = 0x40
-    _READONLY = True
+    BLOCK: int=128
+    _ID: int=0x40
+    READONLY: bool=True
     _PARAMETERS = {
             'type':             {'offset': 1,   'size': 3}, 
             'serial':           {'offset': 4,   'size': 4}, 
@@ -222,13 +208,11 @@ class ROTOR_HEADER(ConfigBlock):
             'accuracy_B':       {'offset': 16,  'size': 1},
     }
 
-    def __init__(self) -> None:
-        super().__init__()
-
+@dataclass
 class ROTOR_FACTORY_CALIBRATION(ConfigBlock):
-    _BLOCK = 129
-    _ID = 0x41
-    _READONLY = True
+    BLOCK: int=129
+    _ID: int=0x41
+    READONLY: bool=True
     _PARAMETERS = {
             'calibration_time': {'offset': 1,   'size': 4},
             'gain_A':           {'offset': 5,   'size': 2},
@@ -243,9 +227,6 @@ class ROTOR_FACTORY_CALIBRATION(ConfigBlock):
             'uncertainty_B':    {'offset': 23,  'size': 2},            
     }
 
-    def __init__(self) -> None:
-        super().__init__()
-
     def __getattribute__(self, name: str) -> Any:
         value = super().__getattribute__(name)
         match(name):
@@ -253,18 +234,17 @@ class ROTOR_FACTORY_CALIBRATION(ConfigBlock):
                 value = value/10000
         return value
 
+@dataclass
 class ROTOR_USER_CALIBRATION(ROTOR_FACTORY_CALIBRATION):
-    _BLOCK = 130
-    _ID = 0x42
-    _READONLY = False
+    BLOCK: int=130
+    _ID: int=0x42
+    READONLY: bool=False
 
-    def __init__(self) -> None:
-        super().__init__()
-
+@dataclass
 class ROTOR_OPERATION(ConfigBlock):
-    _BLOCK = 131
-    _ID = 0x43
-    _READONLY = False
+    BLOCK: int=131
+    _ID: int=0x43
+    READONLY: bool=False
     _PARAMETERS = {
         'calibration_time':     {'offset': 1,   'size': 4}, 
         'reserved_0':           {'offset': 5,   'size': 1},
@@ -272,17 +252,37 @@ class ROTOR_OPERATION(ConfigBlock):
         'sensor_serials':       {'offset': 17,  'size': 9},
     }
 
-    def __init__(self) -> None:
-        super().__init__()
-
 class Config:
     def __init__(self) -> None:
-        self.stator_hardware = STATOR_HARDWARE()
-        self.stator_header = STATOR_HEADER()
-        self.stator_operation = STATOR_OPERATION()
-        self.stator_software_config = STATOR_SOFTWARE_CONFIG()
+        self.stator_header              = STATOR_HEADER()
+        self.stator_hardware            = STATOR_HARDWARE()
+        self.stator_operation           = STATOR_OPERATION()
+        self.stator_software_config     = STATOR_SOFTWARE_CONFIG()
 
-        self.rotor_header = ROTOR_HEADER()
-        self.rotor_factory_calibration = ROTOR_FACTORY_CALIBRATION()
-        self.rotor_user_calibration = ROTOR_USER_CALIBRATION()
-        self.rotor_operation = ROTOR_OPERATION()
+        self.rotor_header               = ROTOR_HEADER()
+        self.rotor_factory_calibration  = ROTOR_FACTORY_CALIBRATION()
+        self.rotor_user_calibration     = ROTOR_USER_CALIBRATION()
+        self.rotor_operation            = ROTOR_OPERATION()
+
+        self._blocks = [
+            "stator_header",         
+            "stator_hardware",
+            "stator_operation",      
+            "stator_software_config",
+            "rotor_header",   
+            "rotor_factory_calibration",
+            "rotor_user_calibration",
+            "rotor_operation"
+        ]
+    
+    def __iter__(self):
+        self.iter_idx = 0
+        return self
+
+    def __next__(self) -> ConfigBlock:
+        try:
+            block = getattr(self, self._blocks[self.iter_idx])
+            self.iter_idx += 1
+            return block
+        except IndexError:
+            raise StopIteration

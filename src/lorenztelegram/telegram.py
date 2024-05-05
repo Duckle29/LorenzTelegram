@@ -8,6 +8,8 @@ import math
 
 from enum import IntEnum
 
+from lorenztelegram.configBlocks import Config
+
 class UnsupportedCommand(Exception):
     pass
 
@@ -95,6 +97,8 @@ class Telegram:
         self.addr_to = addr_to
         self.addr_from = addr_from
 
+        if type(parameters) in [bytes, bytearray]:
+            parameters = list(parameters)
         self.parameters = parameters
 
         self.parameter_cnt = len(parameters)
@@ -172,12 +176,6 @@ class Telegram:
 
         return bytes([Command.STX] + tg)
 
-
-class SensorConfig:
-    
-    def __init__(self) -> None:
-        pass
-
 class LorenzConnector:
 
     SAMPLE_RATES = {
@@ -221,6 +219,8 @@ class LorenzConnector:
         self.ser.timeout = timeout
 
         self.mode = "undefined"
+
+        self.config = Config()
     
     def __enter__(self):
         self.ser.open()
@@ -279,6 +279,9 @@ class LorenzConnector:
                 
             resp = self.ser.read()
             rx_tg.append(resp)
+        
+        if resp == b'':
+            return None
 
         rx_tg = [int.from_bytes(b, "big") for b in rx_tg]
         
@@ -313,18 +316,29 @@ class LorenzConnector:
     def get_status(self, addr_to: int=1) -> Telegram:
         return self._send_telegram(Telegram(Command.SCMD_ReadStatus, addr_to=addr_to))
 
-    def get_config_block(self, block: int, addr_to: int=1) -> Telegram:
-        block = min(0xFF, max(0, block))
-        return self._send_telegram(Telegram(Command.SCMD_ReadConfig, addr_to=addr_to, parameters=[block]))
-
-    def write_config_block(self, block: int, params: list[int]=[], addr_to: int=1) -> Telegram:
-        block = min(0xFF, max(0, block))
-
     def restart_device(self, addr_to: int=1) -> Telegram:
         return self._send_telegram(Telegram(Command.SCMD_RestartDevice, addr_to=addr_to))
 
     def zero_angle(self, addr_to: int=1) -> Telegram:
         return self._send_telegram(Telegram(Command.SCMD_SetAngleToZero, addr_to=addr_to))
+
+    def read_config(self, addr_to: int=1):
+        for block in self.config:
+            tg = Telegram(Command.SCMD_ReadConfig, parameters=[block.BLOCK])
+            payload = self._send_telegram(tg)
+            if payload is None:
+                print(f'Failed to read: {block.__class__.__name__}')
+                continue
+            payload = payload.parameters
+            block.from_payload(payload)
+
+    def write_config(self, addr_to: int=1):
+        for block in self.config:
+            if not block.READONLY:
+                payload = block.serialize()
+                params = block.BLOCK.to_bytes(1, 'big') + payload
+                tg = Telegram(Command.SCMD_WriteConfig, addr_to=addr_to, parameters=params)
+                self._send_telegram(tg)
 
     def start_streaming(self, sample_rate: int, count: int=0, channel: str='A'):
 
@@ -370,8 +384,6 @@ class LorenzConnector:
         self.mode = 'idle'
 
 class LCV_USB(LorenzConnector):
-
-
     UNSUPPORTED_COMMANDS = [
         Command.SCMD_SetAngleToZero,
     ]
@@ -390,12 +402,14 @@ class LCV_USB(LorenzConnector):
 
 if __name__ == '__main__':
     with LCV_USB('COM7') as lc:
-        start = time.time()
-        ret = lc.start_streaming(1000)
+        lc.read_config()
+        print('horse')
+        #start = time.time()
+        #ret = lc.start_streaming(1000)
 
-        while time.time() < start+5:
-            idx, val = lc.streaming_recv_poll()
-            if val is not None:
-                print(f'{idx:3d}: {val}')
-            #time.sleep(0.01)
-        lc.stop_streaming()
+        # while time.time() < start+5:
+        #     idx, val = lc.streaming_recv_poll()
+        #     if val is not None:
+        #         print(f'{idx:3d}: {val}')
+        #     #time.sleep(0.01)
+        # lc.stop_streaming()
