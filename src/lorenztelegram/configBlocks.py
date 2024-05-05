@@ -2,12 +2,11 @@
 
 from typing import Any
 
-
 class ConfigBlock:
     _PARAMETERS = {}
     _READONLY = False
-    def __init__(self, block_id: int, payload: int=[0 for _ in range(27)]) -> None:
-        self._ID = block_id
+    _ID = None
+    def __init__(self, payload: int=[0 for _ in range(27)]) -> None:
         self.payload = payload
 
         self._PARAMETERS['checksum'] = {'offset': 28,  'size': 2}
@@ -108,7 +107,7 @@ class STATOR_HEADER(ConfigBlock):
     }
 
     def __init__(self) -> None:
-        super().__init__(self._ID)
+        super().__init__()
 
 class STATOR_HARDWARE(ConfigBlock):
     _BLOCK = 1
@@ -140,7 +139,7 @@ class STATOR_HARDWARE(ConfigBlock):
     }
 
     def __init__(self) -> None:
-        super().__init__(self._ID)
+        super().__init__()
 
 class STATOR_OPERATION(ConfigBlock):
     _BLOCK = 2
@@ -187,9 +186,9 @@ class STATOR_OPERATION(ConfigBlock):
     }
 
     def __init__(self) -> None:
-        super().__init__(self._ID)
+        super().__init__()
 
-class STATOR_SOFTWARE_CONFIG_1(ConfigBlock):
+class STATOR_SOFTWARE_CONFIG(ConfigBlock):
     _BLOCK = 3
     _ID = 0x14
     _READONLY = False
@@ -205,7 +204,7 @@ class STATOR_SOFTWARE_CONFIG_1(ConfigBlock):
     }
 
     def __init__(self) -> None:
-        super().__init__(self._ID)
+        super().__init__()
 
 class ROTOR_HEADER(ConfigBlock):
     _BLOCK = 128
@@ -224,9 +223,9 @@ class ROTOR_HEADER(ConfigBlock):
     }
 
     def __init__(self) -> None:
-        super().__init__(self._ID)
+        super().__init__()
 
-class ROTOR_FACTORY_CALIBRATE(ConfigBlock):
+class ROTOR_FACTORY_CALIBRATION(ConfigBlock):
     _BLOCK = 129
     _ID = 0x41
     _READONLY = True
@@ -235,6 +234,55 @@ class ROTOR_FACTORY_CALIBRATE(ConfigBlock):
             'gain_A':           {'offset': 5,   'size': 2},
             'offset_A':         {'offset': 7,   'size': 2},
             'gain_B':           {'offset': 9,   'size': 2},
-            'offset_B':         {'offset': 11,   'size': 2},
-            'cal_gain_A':       {''}
+            'offset_B':         {'offset': 11,  'size': 2},
+            'cal_gain_A':       {'offset': 13,  'size': 2},
+            'cal_gain_B':       {'offset': 15,  'size': 2},
+            'nom_adap_fact_A':  {'offset': 17,  'size': 2},
+            'nom_adap_fact_B':  {'offset': 19,  'size': 2},
+            'uncertainty_A':    {'offset': 21,  'size': 2},
+            'uncertainty_B':    {'offset': 23,  'size': 2},            
     }
+
+    def __init__(self) -> None:
+        super().__init__()
+
+    def __getattribute__(self, name: str) -> Any:
+        value = super().__getattribute__(name)
+        match(name):
+            case ['uncertainty_A', 'uncertainty_B']:
+                value = value/10000
+        return value
+
+class ROTOR_USER_CALIBRATION(ROTOR_FACTORY_CALIBRATION):
+    _BLOCK = 130
+    _ID = 0x42
+    _READONLY = False
+
+    def __init__(self) -> None:
+        super().__init__()
+
+class ROTOR_OPERATION(ConfigBlock):
+    _BLOCK = 131
+    _ID = 0x43
+    _READONLY = False
+    _PARAMETERS = {
+        'calibration_time':     {'offset': 1,   'size': 4}, 
+        'reserved_0':           {'offset': 5,   'size': 1},
+        'radio_channel':        {'offset': 8,   'size': 1},
+        'sensor_serials':       {'offset': 17,  'size': 9},
+    }
+
+    def __init__(self) -> None:
+        super().__init__()
+
+class Config:
+    def __init__(self) -> None:
+        self.stator_hardware = STATOR_HARDWARE()
+        self.stator_header = STATOR_HEADER()
+        self.stator_operation = STATOR_OPERATION()
+        self.stator_software_config = STATOR_SOFTWARE_CONFIG()
+
+        self.rotor_header = ROTOR_HEADER()
+        self.rotor_factory_calibration = ROTOR_FACTORY_CALIBRATION()
+        self.rotor_user_calibration = ROTOR_USER_CALIBRATION()
+        self.rotor_operation = ROTOR_OPERATION()
