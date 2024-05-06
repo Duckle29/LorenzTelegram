@@ -3,6 +3,9 @@
 from typing import Any
 from dataclasses import dataclass
 
+class BadBlockID(Exception):
+    pass
+
 class ConfigBlock:
     _PARAMETERS = {}
     READONLY = False
@@ -38,16 +41,22 @@ class ConfigBlock:
         return checksum.to_bytes(2), wchecksum.to_bytes(2)
 
     def from_payload(self, payload: list[int]) -> None:
+        block_num = payload[0]
+        if block_num != self.BLOCK:
+            print(len(payload))
+            raise BadBlockID(f'Expected block: {self.BLOCK}, got block {block_num}')
+        payload = payload[1:]
+        
         for attr in self._PARAMETERS:
             if attr in ['checksum', 'wchecksum']:
-                continue
-            
+                continue            
+
             value = 0
-            idx = self._PARAMETERS[attr]['offset'] + self._PARAMETERS[attr]['size'] - 1
+            idx = self._PARAMETERS[attr]['offset']
             for _ in range(self._PARAMETERS[attr]['size']):
                 value = value << 8
                 value += payload[idx]                
-                idx -= 1
+                idx += 1
 
             if 'LUT' in self._PARAMETERS[attr]:
                 if value in self._PARAMETERS[attr]['LUT']:

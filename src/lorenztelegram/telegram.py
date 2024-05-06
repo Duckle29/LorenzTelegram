@@ -2,9 +2,7 @@
 import warnings
 
 import serial
-import threading
-import time
-import math
+from pathlib import Path
 
 from enum import IntEnum
 
@@ -123,12 +121,13 @@ class Telegram:
         else:
             bytes_obj = bytes_obj[1:] # Remove STX
         
-        self.command = bytes_obj[0]
+        self.command = Command(bytes_obj[0])
         self.addr_to = bytes_obj[1]
         self.addr_from = bytes_obj[2]
         self.parameter_cnt = bytes_obj[3]
         
         if self.parameter_cnt > 0:
+            self.parameters = []
             for b in bytes_obj[4:-2]:
                 self.parameters.append(b)
         
@@ -160,6 +159,13 @@ class Telegram:
         
         return checksum, wchecksum
 
+    def stuff(self, payload: list[int]) -> list[int]:
+        out = []
+        for itm in payload:
+            out.append(itm)
+            if itm == Command.STX:
+                out.append(itm)
+        return out
 
     def serialize(self) -> bytes:
         """Serialize the Telegram to a bytes string for sending
@@ -168,11 +174,9 @@ class Telegram:
             bytes: bytes string to send to sensor
         """
         tg = [self.command, self.addr_to, self.addr_from, self.parameter_cnt] + self.parameters
-        tg += [self.checksum, self.wchecksum]
+        tg += list(self.calc_checksums())
 
-        if Command.STX in tg:
-            # Stuff an extra STX in there
-            tg = [Command.STX] + tg
+        tg = self.stuff(tg)
 
         return bytes([Command.STX] + tg)
 
@@ -268,25 +272,24 @@ class LorenzConnector:
 
         expected_len = rx_params + 7
         
-        resp = self.ser.read()
-        rx_tg = [resp]
-
-        while resp != b'' and len(rx_tg) < expected_len:
-
-            if len(rx_tg) == 2:
-                if rx_tg[0] == rx_tg[1] == Command.STX:
-                    expected_len += 1
-                
+        resp = None
+        while resp != Command.STX.to_bytes(1,'big') and resp != b'':
             resp = self.ser.read()
-            rx_tg.append(resp)
+        rx = [resp]
+
+        while resp != b'' and len(rx) < expected_len:
+            resp = self.ser.read()
+            if resp == Command.STX.to_bytes(1,'big'):
+                resp = self.ser.read()
+            rx.append(resp)
         
         if resp == b'':
             return None
 
-        rx_tg = [int.from_bytes(b, "big") for b in rx_tg]
+        rx = [int.from_bytes(b, "big") for b in rx]
         
         tg = Telegram()
-        tg.from_bytes(bytes(rx_tg))
+        tg.from_bytes(bytes(rx))
         return tg
 
     def hello(self, addr_to: int=1) -> Telegram | None:
@@ -322,15 +325,36 @@ class LorenzConnector:
     def zero_angle(self, addr_to: int=1) -> Telegram:
         return self._send_telegram(Telegram(Command.SCMD_SetAngleToZero, addr_to=addr_to))
 
+    def _dump_all_blocks(self, addr_to: int=1):
+        with (Path(__file__).parent / 'dump.txt').open('w') as fp:
+            for block in range(0xFF):
+                tg = Telegram(Command.SCMD_ReadConfig, parameters=[block])
+                
+                fp.write(f'BLOCK{block:>3}:\n\tTX:')
+                for b in tg.serialize():
+                    fp.write(f'{b:02X} ')
+                fp.write('\n\tRX:')
+                
+                rx_tg = self._send_telegram(tg)
+                if rx_tg is None:
+                    fp.write(f'Failed to read: {block}\n')
+                    continue
+
+                for b in rx_tg.serialize():
+                    fp.write(f'{b:02X} ')
+                fp.write('\n')
+
+
+
     def read_config(self, addr_to: int=1):
         for block in self.config:
             tg = Telegram(Command.SCMD_ReadConfig, parameters=[block.BLOCK])
-            payload = self._send_telegram(tg)
-            if payload is None:
+            rx_tg = self._send_telegram(tg)
+            if rx_tg is None:
                 print(f'Failed to read: {block.__class__.__name__}')
                 continue
-            payload = payload.parameters
-            block.from_payload(payload)
+            
+            block.from_payload(rx_tg.parameters)
 
     def write_config(self, addr_to: int=1):
         for block in self.config:
@@ -403,6 +427,7 @@ class LCV_USB(LorenzConnector):
 if __name__ == '__main__':
     with LCV_USB('COM7') as lc:
         lc.read_config()
+        #lc.dump_all_blocks()
         print('horse')
         #start = time.time()
         #ret = lc.start_streaming(1000)
