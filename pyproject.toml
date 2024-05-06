@@ -1,6 +1,6 @@
 [project]
 name = "LorenzTelegram"
-version = "0.0.2"
+version = "0.1.0"
 description = "A library to communicate with Lorenz Messtechnik sensors"
 authors = [
     {name = "Mikkel Jeppesen", email = "2756925+Duckle29@users.noreply.github.com"},
