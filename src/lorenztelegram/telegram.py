@@ -11,6 +11,9 @@ from lorenztelegram.configBlocks import Config
 class UnsupportedCommand(Exception):
     pass
 
+class CommunicationError(Exception):
+    pass
+
 class Error(IntEnum):
     OK =                            0
     GENERIC =                       1
@@ -181,20 +184,8 @@ class Telegram:
         return bytes([Command.STX] + tg)
 
 class LorenzConnector:
-
-    SAMPLE_RATES = {
-            20:     0xFA,
-            25:     0xC8,
-            50:     0x64,
-            100:    0x32,
-            200:    0x19,
-            250:    0x14,
-            500:    0x0A,
-            1000:   0x05,
-            1250:   0x04,
-            2500:   0x02,
-            5000:   0x01
-        }
+    UNSUPPORTED_COMMANDS = [
+    ]
 
     def __init__(self, port: str, timeout=0.01, **kwargs):
         """Create an object with a connection to a serial device
@@ -231,6 +222,7 @@ class LorenzConnector:
         return self
     
     def __exit__(self, exc_type, exc_val, exc_tb):
+        self.ser.write(Command.STX.to_bytes(1, 'big')) # stop SOSM
         self.ser.close()
     
     def _send_telegram(self, tg: Telegram) -> Telegram | None:
@@ -282,6 +274,9 @@ class LorenzConnector:
             if resp == Command.STX.to_bytes(1,'big'):
                 resp = self.ser.read()
             rx.append(resp)
+            if len(rx) == 2 and rx[1] == int.to_bytes(Command.SCMD_NACK):
+                expected_len = 8
+
         
         if resp == b'':
             return None
@@ -325,8 +320,12 @@ class LorenzConnector:
     def zero_angle(self, addr_to: int=1) -> Telegram:
         return self._send_telegram(Telegram(Command.SCMD_SetAngleToZero, addr_to=addr_to))
 
-    def _dump_all_blocks(self, addr_to: int=1):
-        with (Path(__file__).parent / 'dump.txt').open('w') as fp:
+    def _dump_all_blocks(self, addr_to: int=1, dump_file_path: Path=None):
+
+        if dump_file_path is None:
+            dump_file_path = (Path(__file__).parent) / 'dump.txt'
+
+        with dump_file_path.open('w') as fp:
             for block in range(0xFF):
                 tg = Telegram(Command.SCMD_ReadConfig, parameters=[block])
                 
@@ -343,8 +342,6 @@ class LorenzConnector:
                 for b in rx_tg.serialize():
                     fp.write(f'{b:02X} ')
                 fp.write('\n')
-
-
 
     def read_config(self, addr_to: int=1):
         for block in self.config:
@@ -374,17 +371,22 @@ class LorenzConnector:
         else:
             self.mode = 'SOSM_SINGLE'
 
-        params = [3, self.SAMPLE_RATES[sample_rate]]
+        # Sample rate is the period / 200us
+        # 0xFF ~ 19.61 Hz
+        sample_rate = int(1/sample_rate // 0.0002)
+        sample_rate = min(0xFF, max(0, sample_rate))
+        params = [3, sample_rate]
         
         count = min(0xFFFF, max(0, count))
-        if count <= 0xFF:
-            params.append(0)
-        params.append(count)
+        params.append(count >> 8)
+        params.append(count & 0xFF)
         params.append(ord(channel))
         
         # Switch to SOSM mode #3
         tg = Telegram(Command.SCMD_GotoSpecialMode, parameters=params)
-        return self._send_telegram(tg)
+        rx_tg = self._send_telegram(tg)
+        if rx_tg.command != Command.SCMD_ACK:
+            raise ConnectionError(f'\n\tStart streaming failed with error: {repr(Error(rx_tg.parameters[-1]))}.\n\tIs the sampling rate too high?')
     
     def streaming_recv_poll(self):
         if not 'SOSM' in self.mode:
@@ -395,9 +397,11 @@ class LorenzConnector:
         idx = 0
         val = None
         if self.ser.in_waiting >= expected_bytes:
-            resp = self.ser.read(3)
+            resp = self.ser.read(expected_bytes)
             idx = resp[0]
-            val = int.from_bytes(resp[1:], 'big', signed=True)
+            val = int.from_bytes(resp[1:3], 'big', signed=True)
+            if expected_bytes == 5:
+                val = [val, int.from_bytes(resp[3:], 'big', signed=True), resp]
         return idx, val
     
     def stop_streaming(self):
@@ -407,34 +411,18 @@ class LorenzConnector:
 
         self.mode = 'idle'
 
-class LCV_USB(LorenzConnector):
-    UNSUPPORTED_COMMANDS = [
-        Command.SCMD_SetAngleToZero,
-    ]
-    
-    def __init__(self, port: str, **kwargs) -> None:
-
-        if 'baudrate' in kwargs:
-            if kwargs['baudrate'] not in [115200, 230400]:
-                kwargs['baudrate'] = 115200
-                warnings.warn('Device only supports 115.2 or 230.4 kbaud. Defaulted to 115.2k')
-        else:
-            kwargs['baudrate'] = 115200
-        
-        super().__init__(port, timeout=0.1, **kwargs)
-    
 
 if __name__ == '__main__':
-    with LCV_USB('COM7') as lc:
+    with LorenzConnector('COM7') as lc:
         lc.read_config()
         #lc.dump_all_blocks()
         print('horse')
         #start = time.time()
-        #ret = lc.start_streaming(1000)
+        ret = lc.start_streaming(20)
 
-        # while time.time() < start+5:
-        #     idx, val = lc.streaming_recv_poll()
-        #     if val is not None:
-        #         print(f'{idx:3d}: {val}')
-        #     #time.sleep(0.01)
-        # lc.stop_streaming()
+        while True: # time.time() < start+5:
+            idx, val = lc.streaming_recv_poll()
+            if val is not None:
+                print(f'{idx:3d}: {val:6d}')
+            #time.sleep(0.01)
+        lc.stop_streaming()
